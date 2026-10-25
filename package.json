@@ -1,0 +1,60 @@
+{
+  "name": "wifi-off-scheduler",
+  "productName": "Wi-Fi OFF Scheduler",
+  "description": "Windows desktop application for flexible automated Wi-Fi disconnection, connection, toggling, and IP renewal scheduling.",
+  "version": "1.0.0",
+  "main": "main.js",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "dev": "node dev-server.js",
+    "start": "electron .",
+    "dist": "electron-builder --win",
+    "test:schedule": "node test-schedule.js",
+    "test:tasks": "node test-tasks.js"
+  },
+  "devDependencies": {
+    "electron": "^33.4.11",
+    "electron-builder": "^26.18.0"
+  },
+  "build": {
+    "appId": "com.wifioff.scheduler",
+    "productName": "Wi-Fi OFF Scheduler",
+    "directories": {
+      "output": "dist",
+      "buildResources": "build"
+    },
+    "files": [
+      "main.js",
+      "taskscheduler.js",
+      "scheduler.js",
+      "wifi.js",
+      "store.js",
+      "preload.js",
+      "renderer/**/*",
+      "build/**/*"
+    ],
+    "win": {
+      "target": [
+        "nsis",
+        "portable"
+      ],
+      "icon": "build/icon.ico",
+      "requestedExecutionLevel": "asInvoker",
+      "signAndEditExecutable": false,
+      "forceCodeSigning": false
+    },
+    "nsis": {
+      "include": "build/installer.nsh",
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "artifactName": "${productName}-Setup-${version}.${ext}"
+    },
+    "portable": {
+      "artifactName": "${productName}-Portable-${version}.${ext}"
+    }
+  }
+}

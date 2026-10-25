@@ -1,0 +1,8 @@
+{
+  "name": "Wi-Fi OFF Scheduler",
+  "description": "Compact Windows desktop application and preview for scheduling Wi-Fi disconnection, connection, and IP renewal.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
