@@ -97,12 +97,7 @@ const api = {
   },
   exportHistory: (fmt) => (isElectron ? window.electronAPI.exportHistory(fmt) : Promise.resolve({ success: false, message: 'Desktop feature.' })),
   minimizeWindow: () => (isElectron ? window.electronAPI.minimizeWindow() : null),
-  closeWindow: () => (isElectron ? window.electronAPI.closeWindow() : null),
-  getAppInfo: () => (isElectron ? window.electronAPI.getAppInfo() : Promise.resolve({ name: 'Wi-Fi OFF Scheduler', version: '1.0.0' })),
-  openExternal: (key) => (isElectron ? window.electronAPI.openExternal(key) : Promise.resolve({ success: false })),
-  getTaskSchedulerStatus: () => (isElectron ? window.electronAPI.getTaskSchedulerStatus() : Promise.resolve({ isWindows: false, taskCount: 0, tasks: [] })),
-  resyncTasks: () => (isElectron ? window.electronAPI.resyncTasks() : Promise.resolve({ success: true, taskCount: 0 })),
-  removeAllTasks: () => (isElectron ? window.electronAPI.removeAllTasks() : Promise.resolve({ success: true }))
+  closeWindow: () => (isElectron ? window.electronAPI.closeWindow() : null)
 };
 
 // Application State
@@ -110,7 +105,7 @@ const state = {
   wifi: null,
   profiles: [],
   rules: [],
-  settings: { timeFormat: '12h', theme: 'system', pauseAll: false, useTaskScheduler: true },
+  settings: { timeFormat: '12h', theme: 'system', pauseAll: false },
   history: [],
   page: 'home',
   ruleSearch: '',
@@ -1004,52 +999,6 @@ function initEvents() {
   $('setMinimized').onchange = (e) => api.saveSettings({ startMinimized: e.target.checked });
   $('setMinToTray').onchange = (e) => api.saveSettings({ minimizeToTray: e.target.checked });
   $('setCatchUp').onchange = (e) => api.saveSettings({ catchUpMinutes: parseInt(e.target.value, 10) || 10 });
-
-  // Windows Task Scheduler Settings Controls
-  $('setUseTaskScheduler').onchange = async (e) => {
-    state.settings.useTaskScheduler = e.target.checked;
-    await api.saveSettings({ useTaskScheduler: e.target.checked });
-    await updateTaskSchedulerUI();
-    showToast(e.target.checked ? 'Background schedules enabled' : 'Background schedules disabled');
-  };
-
-  $('btnResyncTasks').onclick = async () => {
-    showToast('Re-syncing Windows tasks...');
-    const res = await api.resyncTasks();
-    await updateTaskSchedulerUI();
-    showToast(`Synced ${res.taskCount || 0} tasks with Windows Task Scheduler`);
-  };
-
-  $('btnRemoveAllTasks').onclick = () => {
-    $('taskConfirmDialog').classList.remove('hidden');
-  };
-
-  $('btnCancelTaskConfirm').onclick = () => {
-    $('taskConfirmDialog').classList.add('hidden');
-  };
-
-  $('btnOkTaskConfirm').onclick = async () => {
-    $('taskConfirmDialog').classList.add('hidden');
-    await api.removeAllTasks();
-    await updateTaskSchedulerUI();
-    showToast('All Windows scheduled tasks removed');
-  };
-
-  // Developer Connect & Social Links (About Page)
-  document.querySelectorAll('.social-card').forEach((card) => {
-    card.onclick = () => {
-      const key = card.dataset.social;
-      if (key) api.openExternal(key);
-    };
-    card.onkeydown = (e) => {
-      if (e.key === 'Enter' || e.key === ' ') {
-        e.preventDefault();
-        const key = card.dataset.social;
-        if (key) api.openExternal(key);
-      }
-    };
-  });
-
   $('btnSettingExport').onclick = api.exportRules;
   $('btnSettingImport').onclick = async () => {
     const res = await api.importRules();
@@ -1057,7 +1006,6 @@ function initEvents() {
       state.rules = await api.getRules();
       renderRules();
       updateNextAndLastUI();
-      await updateTaskSchedulerUI();
       showToast('Rules imported');
     }
   };
@@ -1067,7 +1015,6 @@ function initEvents() {
     if (e.key === 'Escape') {
       if (!$('connectPickerBackdrop').classList.contains('hidden')) $('connectPickerBackdrop').classList.add('hidden');
       else if (!$('deleteDialog').classList.contains('hidden')) $('deleteDialog').classList.add('hidden');
-      else if (!$('taskConfirmDialog').classList.contains('hidden')) $('taskConfirmDialog').classList.add('hidden');
       else if (!$('editorBackdrop').classList.contains('hidden')) closeEditor();
       closePopovers();
     } else if (e.key === 'Enter' && !$('editorBackdrop').classList.contains('hidden') && e.target.tagName !== 'TEXTAREA') {
@@ -1078,18 +1025,6 @@ function initEvents() {
   });
 
   document.addEventListener('click', closePopovers);
-}
-
-async function updateTaskSchedulerUI() {
-  const status = await api.getTaskSchedulerStatus();
-  if (!status.isWindows) {
-    $('taskStatusDesc').textContent = 'Windows Task Scheduler is only active on Windows OS.';
-    $('setUseTaskScheduler').disabled = true;
-    $('btnResyncTasks').disabled = true;
-    $('btnRemoveAllTasks').disabled = true;
-  } else {
-    $('taskStatusDesc').textContent = `Active Windows tasks: ${status.taskCount}`;
-  }
 }
 
 function openDeleteDialog(ruleId, ruleName) {
@@ -1218,7 +1153,6 @@ async function init() {
   $('setMinimized').checked = !!state.settings.startMinimized;
   $('setMinToTray').checked = state.settings.minimizeToTray !== false;
   $('setCatchUp').value = state.settings.catchUpMinutes || 10;
-  $('setUseTaskScheduler').checked = state.settings.useTaskScheduler !== false;
 
   document.querySelectorAll('#setTimeFormat .seg-btn').forEach((b) => b.classList.toggle('active', b.dataset.val === state.settings.timeFormat));
   document.querySelectorAll('#setTheme .seg-btn').forEach((b) => b.classList.toggle('active', b.dataset.val === state.settings.theme));
@@ -1228,18 +1162,6 @@ async function init() {
   renderRules();
   await refreshWifi();
   updateNextAndLastUI();
-  await updateTaskSchedulerUI();
-
-  // Load About Page metadata
-  try {
-    const info = await api.getAppInfo();
-    const ver = info && info.version ? info.version : '1.0.0';
-    $('aboutHeroVersion').textContent = `v${ver}`;
-    const curYr = new Date().getFullYear();
-    $('aboutFooterText').textContent = `Wi-Fi OFF Scheduler v${ver} — © ${curYr} DinethPansiluW. All rights reserved.`;
-  } catch (err) {
-    console.warn('Could not load app info:', err);
-  }
 
   // 1-second live countdown ticker
   setInterval(updateNextAndLastUI, 1000);
@@ -1251,15 +1173,7 @@ async function init() {
       state.rules = r;
       renderRules();
       updateNextAndLastUI();
-      updateTaskSchedulerUI();
     });
-    if (window.electronAPI.onHistoryUpdated) {
-      window.electronAPI.onHistoryUpdated((hist) => {
-        state.history = hist;
-        renderLog();
-        updateNextAndLastUI();
-      });
-    }
     window.electronAPI.onScheduleTicked(() => updateNextAndLastUI());
     window.electronAPI.onToastNotification((msg) => showToast(msg));
   }

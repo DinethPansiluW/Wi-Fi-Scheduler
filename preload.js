@@ -41,15 +41,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
   closeWindow: () => ipcRenderer.send('window:close'),
   isMaximized: () => ipcRenderer.invoke('window:is-maximized'),
 
-  // App Info & External Links (About Page)
-  getAppInfo: () => ipcRenderer.invoke('app:get-info'),
-  openExternal: (key) => ipcRenderer.invoke('app:open-external', key),
-
-  // Windows Task Scheduler Controls
-  getTaskSchedulerStatus: () => ipcRenderer.invoke('tasks:get-status'),
-  resyncTasks: () => ipcRenderer.invoke('tasks:resync'),
-  removeAllTasks: () => ipcRenderer.invoke('tasks:remove-all'),
-
   // Event Listeners from Main process
   onWifiStateChanged: (callback) => {
     const handler = (_event, state) => callback(state);
@@ -61,12 +52,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
     const handler = (_event, rules) => callback(rules);
     ipcRenderer.on('rules:updated', handler);
     return () => ipcRenderer.removeListener('rules:updated', handler);
-  },
-
-  onHistoryUpdated: (callback) => {
-    const handler = (_event, history) => callback(history);
-    ipcRenderer.on('history:updated', handler);
-    return () => ipcRenderer.removeListener('history:updated', handler);
   },
 
   onScheduleTicked: (callback) => {

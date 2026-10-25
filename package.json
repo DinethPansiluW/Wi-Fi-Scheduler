@@ -2,7 +2,7 @@
   "name": "wifi-off-scheduler",
   "productName": "Wi-Fi OFF Scheduler",
   "description": "Windows desktop application for flexible automated Wi-Fi disconnection, connection, toggling, and IP renewal scheduling.",
-  "version": "1.0.0",
+  "version": "1.5.2",
   "main": "main.js",
   "engines": {
     "node": ">=18"
@@ -24,7 +24,7 @@
     "appId": "com.wifioff.scheduler",
     "productName": "Wi-Fi OFF Scheduler",
     "directories": {
-      "output": "dist",
+      "output": "release",
       "buildResources": "build"
     },
     "files": [
