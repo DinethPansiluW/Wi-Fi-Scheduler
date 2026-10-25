@@ -1,22 +1,21 @@
 /**
  * Wi-Fi OFF Scheduler - Windows Task Scheduler Integration
- * Generates Task Scheduler XML, registers background tasks via schtasks.exe,
- * and tracks registered tasks so schedules execute even when the application is exited.
+ * Synchronizes application schedule rules with the Windows Task Scheduler (schtasks)
+ * so rules fire on time even when the app is completely closed.
  */
 
+const { execFile } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
-const { execFile } = require('child_process');
 
-// In-memory set of rule IDs that currently have a confirmed registered Windows Task
-const registeredTaskRuleIds = new Set();
+const IS_WIN = process.platform === 'win32';
 
 /**
- * Escapes characters for safe inclusion inside XML tags and attributes.
+ * Escapes special XML characters to prevent malformed Task XML or injection.
  */
-function xmlEscape(str) {
-  if (str === null || str === undefined) return '';
+function escapeXml(str) {
+  if (str == null) return '';
   return String(str)
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
@@ -26,161 +25,159 @@ function xmlEscape(str) {
 }
 
 /**
- * Validates rule ID against safe identifier regex.
+ * Normalizes day representation (number 0-6 or string 'mon', 'monday', etc.)
  */
-function isValidRuleId(id) {
-  return typeof id === 'string' && /^[A-Za-z0-9_-]+$/.test(id);
+const DAY_NAME_MAP = {
+  0: 'Sunday', sun: 'Sunday', sunday: 'Sunday',
+  1: 'Monday', mon: 'Monday', monday: 'Monday',
+  2: 'Tuesday', tue: 'Tuesday', tuesday: 'Tuesday',
+  3: 'Wednesday', wed: 'Wednesday', wednesday: 'Wednesday',
+  4: 'Thursday', thu: 'Thursday', thursday: 'Thursday',
+  5: 'Friday', fri: 'Friday', friday: 'Friday',
+  6: 'Saturday', sat: 'Saturday', saturday: 'Saturday'
+};
+
+function normalizeDayTag(d) {
+  if (typeof d === 'string') {
+    const k = d.trim().toLowerCase();
+    return DAY_NAME_MAP[k] || null;
+  }
+  if (typeof d === 'number' && d >= 0 && d <= 6) {
+    return DAY_NAME_MAP[d] || null;
+  }
+  return null;
 }
 
 /**
- * Resolves current user identifier for Task Scheduler Principal.
+ * Resolves current user account identifier for Windows Task Principal.
  */
-function getCurrentUser() {
+function getCurrentUserPrincipal() {
   const domain = process.env.USERDOMAIN;
-  const user = process.env.USERNAME || 'Users';
-  return domain ? `${domain}\\${user}` : user;
+  const user = process.env.USERNAME;
+  if (domain && user) {
+    return `${domain}\\${user}`;
+  }
+  return user || 'Users';
 }
 
 /**
- * Determines current executable path and argument prefix for task execution.
+ * Resolves the application executable and launch arguments for task action.
  */
-function getExeInfo() {
-  let isPackaged = false;
-  try {
-    const electron = require('electron');
-    const app = electron.app || (electron.remote && electron.remote.app);
-    if (app && app.isPackaged !== undefined) {
-      isPackaged = app.isPackaged;
-    }
-  } catch {}
-
+function getExeInfo(ruleId) {
   let command = process.execPath;
-  let argsPrefix = '';
+  let args = `--run-rule "${ruleId}"`;
 
   if (process.env.PORTABLE_EXECUTABLE_FILE) {
     command = process.env.PORTABLE_EXECUTABLE_FILE;
-    argsPrefix = '';
-  } else if (isPackaged) {
-    command = process.execPath;
-    argsPrefix = '';
   } else {
-    // Development mode running inside Electron dev runner
-    command = process.execPath;
-    const appDir = path.resolve(__dirname);
-    argsPrefix = `"${appDir}" `;
+    try {
+      const electron = require('electron');
+      const app = electron.app || (electron.remote && electron.remote.app);
+      if (app && !app.isPackaged) {
+        command = process.execPath;
+        const appPath = typeof app.getAppPath === 'function' ? app.getAppPath() : process.cwd();
+        args = `"${appPath}" --run-rule "${ruleId}"`;
+      }
+    } catch {}
   }
 
-  return { command, argsPrefix };
+  return { command, args };
 }
 
 /**
- * Maps day number (0=Sun..6=Sat) or name to Task Scheduler XML tag.
- */
-const DAY_XML_TAGS = {
-  0: 'Sunday',
-  1: 'Monday',
-  2: 'Tuesday',
-  3: 'Wednesday',
-  4: 'Thursday',
-  5: 'Friday',
-  6: 'Saturday',
-  sun: 'Sunday',
-  sunday: 'Sunday',
-  mon: 'Monday',
-  monday: 'Monday',
-  tue: 'Tuesday',
-  tuesday: 'Tuesday',
-  wed: 'Wednesday',
-  wednesday: 'Wednesday',
-  thu: 'Thursday',
-  thursday: 'Thursday',
-  fri: 'Friday',
-  friday: 'Friday',
-  sat: 'Saturday',
-  saturday: 'Saturday'
-};
-
-/**
- * Generates XML for Windows Task Scheduler 2.0 (v1.2).
- * Pure function: takes rule, settings, and exeInfo, returns well-formed XML string.
+ * Pure function returning Task Scheduler v1.2 XML string.
  *
  * @param {Object} rule Rule configuration object.
- * @param {Object} [settings={}] Application settings object.
- * @param {Object} [exeInfo] Optional custom executable info.
- * @returns {string} Task Scheduler XML.
+ * @param {Object} [settings={}] Application settings.
+ * @param {Object} [exeInfo] Optional custom command/args { command, args }.
+ * @returns {string} XML string.
  */
 function buildTaskXml(rule, settings = {}, exeInfo = null) {
-  const info = exeInfo || getExeInfo();
-  const rawTime = (rule.time || '00:00').trim();
-  const [hStr, mStr] = rawTime.split(':');
-  const h = String(parseInt(hStr, 10) || 0).padStart(2, '0');
-  const m = String(parseInt(mStr, 10) || 0).padStart(2, '0');
-  const timeStr = `${h}:${m}:00`;
+  if (!rule) throw new Error('Rule is required');
 
-  const user = getCurrentUser();
-  const exeCommand = info.command;
-  const exeArguments = `${info.argsPrefix || ''}--run-rule "${rule.id}"`;
+  const exe = exeInfo || getExeInfo(rule.id);
+  const principal = getCurrentUserPrincipal();
+  const time = (rule.time || '00:00').trim();
+  const timeFormatted = time.length === 5 ? `${time}:00` : time;
 
+  // Determine Triggers
   let triggersXml = '';
 
-  if (rule.when === 'daily') {
+  if (rule.when === 'once') {
+    const dateStr = rule.date || new Date().toISOString().slice(0, 10);
+    const startBoundary = `${dateStr}T${timeFormatted}`;
+    triggersXml = `    <TimeTrigger>
+      <StartBoundary>${escapeXml(startBoundary)}</StartBoundary>
+      <Enabled>true</Enabled>
+    </TimeTrigger>`;
+  } else if (rule.when === 'daily') {
+    const today = new Date().toISOString().slice(0, 10);
+    const startBoundary = `${today}T${timeFormatted}`;
     triggersXml = `    <CalendarTrigger>
-      <StartBoundary>2020-01-01T${timeStr}</StartBoundary>
+      <StartBoundary>${escapeXml(startBoundary)}</StartBoundary>
       <Enabled>true</Enabled>
       <ScheduleByDay>
         <DaysInterval>1</DaysInterval>
       </ScheduleByDay>
     </CalendarTrigger>`;
   } else if (rule.when === 'weekly') {
-    const rawDays = Array.isArray(rule.days) && rule.days.length ? rule.days : [1, 2, 3, 4, 5];
-    const tags = Array.from(
-      new Set(rawDays.map((d) => DAY_XML_TAGS[typeof d === 'string' ? d.toLowerCase() : d]).filter(Boolean))
-    );
+    const today = new Date().toISOString().slice(0, 10);
+    const startBoundary = `${today}T${timeFormatted}`;
+    const rawDays = Array.isArray(rule.days) && rule.days.length > 0 ? rule.days : [1, 2, 3, 4, 5];
+    const tags = Array.from(new Set(rawDays.map(normalizeDayTag).filter(Boolean)));
+    const dayElements = tags.map((t) => `          <${t} />`).join('\n');
 
-    const daysXml = tags.map((t) => `          <${t} />`).join('\n');
     triggersXml = `    <CalendarTrigger>
-      <StartBoundary>2020-01-01T${timeStr}</StartBoundary>
+      <StartBoundary>${escapeXml(startBoundary)}</StartBoundary>
       <Enabled>true</Enabled>
       <ScheduleByWeek>
         <DaysOfWeek>
-${daysXml}
+${dayElements}
         </DaysOfWeek>
         <WeeksInterval>1</WeeksInterval>
       </ScheduleByWeek>
     </CalendarTrigger>`;
-  } else if (rule.when === 'once') {
-    const dateStr = rule.date || new Date().toISOString().slice(0, 10);
-    triggersXml = `    <TimeTrigger>
-      <StartBoundary>${dateStr}T${timeStr}</StartBoundary>
-      <Enabled>true</Enabled>
-    </TimeTrigger>`;
   } else if (rule.when === 'monthly') {
+    const today = new Date().toISOString().slice(0, 10);
+    const startBoundary = `${today}T${timeFormatted}`;
     const day = Math.max(1, Math.min(31, parseInt(rule.dayOfMonth, 10) || 1));
-    const monthsXml = `        <Months>
-          <January /><February /><March /><April /><May /><June /><July /><August /><September /><October /><November /><December />
+    const allMonths = `        <Months>
+          <January />
+          <February />
+          <March />
+          <April />
+          <May />
+          <June />
+          <July />
+          <August />
+          <September />
+          <October />
+          <November />
+          <December />
         </Months>`;
 
+    // Primary trigger for specific day
     triggersXml = `    <CalendarTrigger>
-      <StartBoundary>2020-01-01T${timeStr}</StartBoundary>
+      <StartBoundary>${escapeXml(startBoundary)}</StartBoundary>
       <Enabled>true</Enabled>
       <ScheduleByMonth>
         <DaysOfMonth>
           <Day>${day}</Day>
         </DaysOfMonth>
-${monthsXml}
+${allMonths}
       </ScheduleByMonth>
     </CalendarTrigger>`;
 
-    // For days 29-31, add a second trigger with <Day>Last</Day> so shorter months execute on the last day
-    if (day >= 29) {
+    // For days 29-31, add a second trigger for the last day of shorter months
+    if (day >= 29 && day <= 31) {
       triggersXml += `\n    <CalendarTrigger>
-      <StartBoundary>2020-01-01T${timeStr}</StartBoundary>
+      <StartBoundary>${escapeXml(startBoundary)}</StartBoundary>
       <Enabled>true</Enabled>
       <ScheduleByMonth>
         <DaysOfMonth>
           <Day>Last</Day>
         </DaysOfMonth>
-${monthsXml}
+${allMonths}
       </ScheduleByMonth>
     </CalendarTrigger>`;
     }
@@ -189,15 +186,14 @@ ${monthsXml}
   return `<?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
   <RegistrationInfo>
-    <Description>${xmlEscape(rule.name || 'Wi-Fi OFF Scheduler Rule')}</Description>
-    <URI>\\WiFiOffScheduler\\Rule_${xmlEscape(rule.id)}</URI>
+    <Description>Wi-Fi OFF Scheduler - Automated Rule ${escapeXml(rule.name || rule.id)}</Description>
   </RegistrationInfo>
   <Triggers>
 ${triggersXml}
   </Triggers>
   <Principals>
     <Principal id="Author">
-      <UserId>${xmlEscape(user)}</UserId>
+      <UserId>${escapeXml(principal)}</UserId>
       <LogonType>InteractiveToken</LogonType>
       <RunLevel>LeastPrivilege</RunLevel>
     </Principal>
@@ -223,41 +219,53 @@ ${triggersXml}
   </Settings>
   <Actions Context="Author">
     <Exec>
-      <Command>${xmlEscape(exeCommand)}</Command>
-      <Arguments>${xmlEscape(exeArguments)}</Arguments>
+      <Command>${escapeXml(exe.command)}</Command>
+      <Arguments>${escapeXml(exe.args)}</Arguments>
     </Exec>
   </Actions>
 </Task>`;
 }
 
 /**
- * Builds task XML for auto-reconnect after N minutes.
+ * Builds XML for a one-time auto-reconnection task.
  */
-function buildReconnectTaskXml(ruleId, ssid, targetDate, exeInfo = null) {
-  const info = exeInfo || getExeInfo();
-  const user = getCurrentUser();
-  const exeCommand = info.command;
-  const exeArguments = `${info.argsPrefix || ''}--reconnect "${ssid}" --rule-id "${ruleId}"`;
+function buildReconnectTaskXml(ruleId, ssid, delayMinutes, exeInfo = null) {
+  let command = process.execPath;
+  let args = `--reconnect "${ssid}" --rule-id "${ruleId}"`;
 
-  const iso = targetDate.toISOString();
-  // Local YYYY-MM-DDTHH:mm:ss
-  const pad = (n) => String(n).padStart(2, '0');
-  const localIso = `${targetDate.getFullYear()}-${pad(targetDate.getMonth() + 1)}-${pad(targetDate.getDate())}T${pad(targetDate.getHours())}:${pad(targetDate.getMinutes())}:${pad(targetDate.getSeconds())}`;
+  if (process.env.PORTABLE_EXECUTABLE_FILE) {
+    command = process.env.PORTABLE_EXECUTABLE_FILE;
+  } else {
+    try {
+      const electron = require('electron');
+      const app = electron.app || (electron.remote && electron.remote.app);
+      if (app && !app.isPackaged) {
+        command = process.execPath;
+        const appPath = typeof app.getAppPath === 'function' ? app.getAppPath() : process.cwd();
+        args = `"${appPath}" --reconnect "${ssid}" --rule-id "${ruleId}"`;
+      }
+    } catch {}
+  }
+
+  const exe = exeInfo || { command, args };
+  const principal = getCurrentUserPrincipal();
+  const triggerTime = new Date(Date.now() + Math.max(1, delayMinutes) * 60 * 1000);
+  const startBoundary = triggerTime.toISOString().slice(0, 19);
 
   return `<?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
   <RegistrationInfo>
-    <Description>Wi-Fi OFF Scheduler Auto-Reconnect</Description>
+    <Description>Wi-Fi OFF Scheduler - Auto-reconnect to ${escapeXml(ssid)}</Description>
   </RegistrationInfo>
   <Triggers>
     <TimeTrigger>
-      <StartBoundary>${localIso}</StartBoundary>
+      <StartBoundary>${escapeXml(startBoundary)}</StartBoundary>
       <Enabled>true</Enabled>
     </TimeTrigger>
   </Triggers>
   <Principals>
     <Principal id="Author">
-      <UserId>${xmlEscape(user)}</UserId>
+      <UserId>${escapeXml(principal)}</UserId>
       <LogonType>InteractiveToken</LogonType>
       <RunLevel>LeastPrivilege</RunLevel>
     </Principal>
@@ -271,166 +279,167 @@ function buildReconnectTaskXml(ruleId, ssid, targetDate, exeInfo = null) {
     <RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable>
     <AllowStartOnDemand>true</AllowStartOnDemand>
     <Enabled>true</Enabled>
+    <Hidden>false</Hidden>
     <ExecutionTimeLimit>PT5M</ExecutionTimeLimit>
     <Priority>7</Priority>
   </Settings>
   <Actions Context="Author">
     <Exec>
-      <Command>${xmlEscape(exeCommand)}</Command>
-      <Arguments>${xmlEscape(exeArguments)}</Arguments>
+      <Command>${escapeXml(exe.command)}</Command>
+      <Arguments>${escapeXml(exe.args)}</Arguments>
     </Exec>
   </Actions>
 </Task>`;
 }
 
 /**
- * Executes a child process via execFile using an argument array.
+ * Creates or updates a scheduled task in Windows Task Scheduler using schtasks /Create.
  */
-function runExecFile(cmd, args) {
+function createScheduledTask(taskName, xmlContent) {
   return new Promise((resolve) => {
-    execFile(cmd, args, { windowsHide: true }, (err, stdout, stderr) => {
-      if (err) {
-        resolve({ ok: false, error: err.message, stderr, code: err.code });
-      } else {
-        resolve({ ok: true, stdout });
-      }
-    });
+    if (!IS_WIN) {
+      return resolve({ ok: true });
+    }
+
+    const tempFile = path.join(os.tmpdir(), `wifioff_${Date.now()}_${Math.random().toString(36).slice(2, 6)}.xml`);
+
+    try {
+      // Write XML as UTF-16 LE with BOM (0xFF, 0xFE)
+      const bom = Buffer.from([0xff, 0xfe]);
+      const content = Buffer.from(xmlContent, 'utf16le');
+      fs.writeFileSync(tempFile, Buffer.concat([bom, content]));
+
+      execFile(
+        'schtasks',
+        ['/Create', '/TN', taskName, '/XML', tempFile, '/F'],
+        { windowsHide: true, timeout: 15000 },
+        (err, stdout, stderr) => {
+          try {
+            if (fs.existsSync(tempFile)) fs.unlinkSync(tempFile);
+          } catch {}
+
+          if (err) {
+            resolve({ ok: false, error: (stderr || err.message || '').trim() });
+          } else {
+            resolve({ ok: true, output: (stdout || '').trim() });
+          }
+        }
+      );
+    } catch (err) {
+      try {
+        if (fs.existsSync(tempFile)) fs.unlinkSync(tempFile);
+      } catch {}
+      resolve({ ok: false, error: err.message });
+    }
   });
 }
 
 /**
- * Registers a Windows Task using schtasks.exe with XML input written in UTF-16 LE with BOM.
+ * Deletes a scheduled task by task path/name using schtasks /Delete.
  */
-async function registerTaskFromXml(taskName, xmlContent) {
-  if (process.platform !== 'win32') {
-    return { ok: false, error: 'Windows Task Scheduler is only supported on Windows.' };
-  }
+function deleteTask(taskName) {
+  return new Promise((resolve) => {
+    if (!IS_WIN) {
+      return resolve({ ok: true });
+    }
 
-  const tmpPath = path.join(os.tmpdir(), `wifioff_${Date.now()}_${Math.random().toString(36).slice(2, 7)}.xml`);
+    execFile(
+      'schtasks',
+      ['/Delete', '/TN', taskName, '/F'],
+      { windowsHide: true, timeout: 15000 },
+      (err, stdout, stderr) => {
+        // schtasks returns error if task does not exist; treat as ok
+        if (err && stderr && !stderr.toLowerCase().includes('cannot find') && !stderr.toLowerCase().includes('not exist')) {
+          resolve({ ok: false, error: stderr.trim() });
+        } else {
+          resolve({ ok: true });
+        }
+      }
+    );
+  });
+}
 
+/**
+ * Schedules a one-time auto-reconnect task at now + delayMinutes.
+ */
+async function scheduleReconnectTask(ruleId, ssid, delayMinutes) {
+  if (!IS_WIN) return { ok: true };
   try {
-    // Write UTF-16 LE with BOM (0xFF, 0xFE)
-    const bom = Buffer.from([0xFF, 0xFE]);
-    const payload = Buffer.concat([bom, Buffer.from(xmlContent, 'utf16le')]);
-    fs.writeFileSync(tmpPath, payload);
-
-    // Call schtasks /Create /TN <taskName> /XML <tmpPath> /F
-    const res = await runExecFile('schtasks', ['/Create', '/TN', taskName, '/XML', tmpPath, '/F']);
-    return res;
+    const taskName = `\\WiFiOffScheduler\\Reconnect_${ruleId}`;
+    const xml = buildReconnectTaskXml(ruleId, ssid, delayMinutes);
+    return await createScheduledTask(taskName, xml);
   } catch (err) {
     return { ok: false, error: err.message };
-  } finally {
-    try {
-      if (fs.existsSync(tmpPath)) fs.unlinkSync(tmpPath);
-    } catch {}
   }
-}
-
-/**
- * Deletes a task from Windows Task Scheduler.
- */
-async function deleteTask(taskName) {
-  if (process.platform !== 'win32') {
-    return { ok: false, error: 'Not on Windows' };
-  }
-  return await runExecFile('schtasks', ['/Delete', '/TN', taskName, '/F']);
-}
-
-/**
- * Creates an auto-reconnect task scheduled for now + delayMinutes.
- */
-async function createReconnectTask(ruleId, ssid, delayMinutes, exeInfo = null) {
-  if (process.platform !== 'win32') return { ok: false };
-  if (!isValidRuleId(ruleId) || !ssid) return { ok: false };
-
-  const targetDate = new Date(Date.now() + Math.max(1, delayMinutes) * 60 * 1000);
-  const xml = buildReconnectTaskXml(ruleId, ssid, targetDate, exeInfo);
-  const taskName = `\\WiFiOffScheduler\\Reconnect_${ruleId}`;
-  return await registerTaskFromXml(taskName, xml);
 }
 
 /**
  * Synchronizes all rules to Windows Task Scheduler.
- * Creates/updates tasks for enabled active rules, removes disabled/completed/missing rules.
+ * Creates/updates \WiFiOffScheduler\Rule_<ruleId> for every enabled, uncompleted rule,
+ * and deletes tasks for disabled, completed, or removed rules.
+ *
  * Never throws; returns { ok, error }.
  *
- * @param {Array} rules List of rule objects from store.
- * @param {Object} [settings={}] Application settings.
- * @param {Object} [exeInfo] Custom executable info.
- * @returns {Promise<Object>} Result object { ok: boolean, created: number, deleted: number }.
+ * @param {Array} rules
+ * @param {Object} [settings={}]
+ * @returns {Promise<{ ok: boolean, error?: string }>}
  */
-async function syncAllTasks(rules = [], settings = {}, exeInfo = null) {
-  if (process.platform !== 'win32') {
-    return { ok: true, skipped: true, platform: process.platform };
+async function syncAllTasks(rules, settings = {}) {
+  if (!IS_WIN) {
+    return { ok: true, platform: process.platform };
   }
+
+  if (!Array.isArray(rules)) {
+    return { ok: true, count: 0 };
+  }
+
+  const isPaused = !!(settings && settings.pauseAll);
+  const idRegex = /^[A-Za-z0-9_-]+$/;
 
   try {
-    const isPaused = !!settings.pauseAll;
-    const activeRules = [];
-    const inactiveRuleIds = [];
-
     for (const rule of rules) {
-      if (!rule || !isValidRuleId(rule.id)) continue;
-
-      if (!isPaused && rule.enabled && !rule.completed) {
-        activeRules.push(rule);
-      } else {
-        inactiveRuleIds.push(rule.id);
+      if (!rule || !rule.id) continue;
+      if (!idRegex.test(rule.id)) {
+        console.warn(`[TaskScheduler] Skipping rule with invalid ID format: "${rule.id}"`);
+        continue;
       }
-    }
 
-    let createdCount = 0;
-    let deletedCount = 0;
+      const taskName = `\\WiFiOffScheduler\\Rule_${rule.id}`;
+      const shouldBeActive = rule.enabled && !rule.completed && !isPaused;
 
-    // Register active rules
-    for (const rule of activeRules) {
-      try {
-        const taskName = `\\WiFiOffScheduler\\Rule_${rule.id}`;
-        const xml = buildTaskXml(rule, settings, exeInfo);
-        const res = await registerTaskFromXml(taskName, xml);
-        if (res.ok) {
-          registeredTaskRuleIds.add(rule.id);
-          createdCount++;
-        } else {
-          console.warn(`[TaskScheduler] Failed to register task for rule ${rule.id}:`, res.error || res.stderr);
+      if (shouldBeActive) {
+        try {
+          const xml = buildTaskXml(rule, settings);
+          const res = await createScheduledTask(taskName, xml);
+          rule.hasOsTask = res.ok;
+          if (!res.ok) {
+            console.warn(`[TaskScheduler] Failed to register task for rule "${rule.name}":`, res.error);
+          }
+        } catch (err) {
+          rule.hasOsTask = false;
+          console.warn(`[TaskScheduler] Error building task for rule "${rule.name}":`, err.message);
         }
-      } catch (err) {
-        console.warn(`[TaskScheduler] Error building task for rule ${rule.id}:`, err.message);
+      } else {
+        await deleteTask(taskName);
+        rule.hasOsTask = false;
       }
     }
 
-    // Delete inactive rules
-    for (const id of inactiveRuleIds) {
-      try {
-        const taskName = `\\WiFiOffScheduler\\Rule_${id}`;
-        await deleteTask(taskName);
-        registeredTaskRuleIds.delete(id);
-        deletedCount++;
-      } catch {}
-    }
-
-    return { ok: true, created: createdCount, deleted: deletedCount };
+    return { ok: true };
   } catch (err) {
-    console.warn('[TaskScheduler] syncAllTasks encountered error:', err.message);
+    console.error('[TaskScheduler] syncAllTasks caught error:', err);
     return { ok: false, error: err.message };
   }
-}
-
-/**
- * Checks if a rule ID is currently registered with Windows Task Scheduler.
- */
-function hasRegisteredTask(ruleId) {
-  return registeredTaskRuleIds.has(ruleId);
 }
 
 module.exports = {
   buildTaskXml,
   buildReconnectTaskXml,
   syncAllTasks,
+  createScheduledTask,
   deleteTask,
-  createReconnectTask,
+  scheduleReconnectTask,
+  escapeXml,
   getExeInfo,
-  hasRegisteredTask,
-  xmlEscape,
-  isValidRuleId
+  IS_WIN
 };

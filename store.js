@@ -120,6 +120,16 @@ class AppStore {
     this.historyMtime = 0;
   }
 
+  getFileMtime(fileName) {
+    try {
+      const filePath = path.join(getDataDir(), fileName);
+      if (fs.existsSync(filePath)) {
+        return fs.statSync(filePath).mtimeMs;
+      }
+    } catch {}
+    return 0;
+  }
+
   init() {
     this.getSettings();
     this.getRules();
@@ -140,19 +150,14 @@ class AppStore {
   }
 
   getRules() {
-    const dir = getDataDir();
-    const filePath = path.join(dir, 'rules.json');
-    let mtime = 0;
-    try {
-      if (fs.existsSync(filePath)) mtime = fs.statSync(filePath).mtimeMs;
-    } catch {}
-
-    if (!this.rules || this.rulesMtime !== mtime) {
-      this.rulesMtime = mtime;
+    const currentMtime = this.getFileMtime('rules.json');
+    if (!this.rules || currentMtime !== this.rulesMtime) {
+      this.rulesMtime = currentMtime;
       const loaded = readJsonSafe('rules.json', null);
       if (!loaded || !Array.isArray(loaded)) {
         this.rules = [...DEFAULT_RULES];
         writeJsonAtomic('rules.json', this.rules);
+        this.rulesMtime = this.getFileMtime('rules.json');
       } else {
         // One-time cleanup: automatically remove example rule if present and still disabled
         const filtered = loaded.filter(
@@ -160,6 +165,7 @@ class AppStore {
         );
         if (filtered.length !== loaded.length) {
           writeJsonAtomic('rules.json', filtered);
+          this.rulesMtime = this.getFileMtime('rules.json');
         }
         this.rules = filtered;
       }
@@ -171,10 +177,7 @@ class AppStore {
     if (!Array.isArray(newRules)) return false;
     this.rules = newRules;
     const ok = writeJsonAtomic('rules.json', this.rules);
-    try {
-      const p = path.join(getDataDir(), 'rules.json');
-      if (fs.existsSync(p)) this.rulesMtime = fs.statSync(p).mtimeMs;
-    } catch {}
+    this.rulesMtime = this.getFileMtime('rules.json');
     return ok;
   }
 
@@ -201,15 +204,9 @@ class AppStore {
   }
 
   getHistory() {
-    const dir = getDataDir();
-    const filePath = path.join(dir, 'history.json');
-    let mtime = 0;
-    try {
-      if (fs.existsSync(filePath)) mtime = fs.statSync(filePath).mtimeMs;
-    } catch {}
-
-    if (!this.history || this.historyMtime !== mtime) {
-      this.historyMtime = mtime;
+    const currentMtime = this.getFileMtime('history.json');
+    if (!this.history || currentMtime !== this.historyMtime) {
+      this.historyMtime = currentMtime;
       this.history = readJsonSafe('history.json', []);
       if (!Array.isArray(this.history)) this.history = [];
     }
@@ -237,16 +234,14 @@ class AppStore {
 
     this.history = history;
     writeJsonAtomic('history.json', history);
-    try {
-      const p = path.join(getDataDir(), 'history.json');
-      if (fs.existsSync(p)) this.historyMtime = fs.statSync(p).mtimeMs;
-    } catch {}
+    this.historyMtime = this.getFileMtime('history.json');
     return entry;
   }
 
   clearHistory() {
     this.history = [];
     writeJsonAtomic('history.json', []);
+    this.historyMtime = this.getFileMtime('history.json');
     return true;
   }
 

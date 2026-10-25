@@ -29,146 +29,194 @@ const {
 } = require('./wifi');
 const {
   SchedulerRunner,
-  computeNextRun
+  computeNextRun,
+  checkMissedRun
 } = require('./scheduler');
-const taskscheduler = require('./taskscheduler');
 
-// Headless mode check (Windows Task Scheduler background execution)
-const runRuleIdx = process.argv.indexOf('--run-rule');
-const reconnectIdx = process.argv.indexOf('--reconnect');
-const isHeadless = runRuleIdx !== -1 || reconnectIdx !== -1;
+let taskscheduler = null;
+try {
+  taskscheduler = require('./taskscheduler');
+} catch (err) {
+  console.warn('[Main] taskscheduler module load error:', err.message);
+}
+
+function getCliArg(flag) {
+  const idx = process.argv.indexOf(flag);
+  return idx !== -1 && idx + 1 < process.argv.length ? process.argv[idx + 1] : null;
+}
+
+const headlessRuleId = getCliArg('--run-rule');
+const reconnectSsid = getCliArg('--reconnect');
+const reconnectRuleId = getCliArg('--rule-id');
+const isHeadless = Boolean(headlessRuleId || reconnectSsid !== null);
 
 if (isHeadless) {
-  // 60-second watchdog to ensure process always terminates
-  const watchdog = setTimeout(() => {
-    console.error('[Headless] Watchdog 60s reached, forcing exit.');
+  // Headless mode for Task Scheduler execution
+  setTimeout(() => {
     app.quit();
     process.exit(0);
   }, 60000);
-  if (watchdog.unref) watchdog.unref();
 
   app.whenReady().then(async () => {
     try {
       store.init();
 
-      if (runRuleIdx !== -1) {
-        const targetRuleId = process.argv[runRuleIdx + 1];
-        const settings = store.getSettings();
-        if (settings.pauseAll) {
-          app.quit();
-          return;
-        }
-
-        const rules = store.getRules();
-        const rule = rules.find((r) => r.id === targetRuleId);
-        if (!rule || !rule.enabled || rule.completed) {
-          app.quit();
-          return;
-        }
-
-        const now = new Date();
-
-        // Monthly rule: for days 29-31, only run on clamped target day
-        if (rule.when === 'monthly') {
-          const daysInMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate();
-          const targetDay = Math.min(parseInt(rule.dayOfMonth, 10) || 1, daysInMonth);
-          if (now.getDate() !== targetDay) {
-            app.quit();
-            return;
-          }
-        }
-
-        // Scheduled time and catch-up window check
-        const { parseTime } = require('./scheduler');
-        const { hour, minute } = parseTime(rule.time || '00:00');
-        let scheduledDate = new Date(now.getFullYear(), now.getMonth(), now.getDate(), hour, minute, 0, 0);
-        if (rule.when === 'once' && rule.date) {
-          const [y, m, d] = rule.date.split('-').map(Number);
-          scheduledDate = new Date(y, m - 1, d, hour, minute, 0, 0);
-        }
-
-        const catchUpMinutes = settings.catchUpMinutes || 10;
-        const diffMs = now.getTime() - scheduledDate.getTime();
-        // Skip if launch is later than catchUpMinutes after scheduled time
-        if (diffMs > catchUpMinutes * 60 * 1000) {
-          app.quit();
-          return;
-        }
-
-        // Avoid duplicate execution of same occurrence
-        const runKey = `${rule.id}_${scheduledDate.toISOString().slice(0, 16)}`;
-        if (rule.lastRunKey === runKey) {
-          app.quit();
-          return;
-        }
-
-        // Execute rule
-        const result = await executeRule(rule);
-
-        // Update rule record
-        rule.lastRunAt = new Date().toISOString();
-        rule.lastRunResult = result.success ? 'success' : 'error';
-        rule.lastRunMessage = result.message;
-        rule.lastRunKey = runKey;
-
-        if (rule.when === 'once') {
-          rule.completed = true;
-          rule.enabled = false;
-          taskscheduler.deleteTask(`\\WiFiOffScheduler\\Rule_${rule.id}`).catch(() => {});
-        }
-
-        store.saveRules(rules);
-
-        // Add history entry
+      // Case 1: Reconnect task
+      if (reconnectSsid !== null) {
+        const res = await connectWifi(reconnectSsid);
         store.addHistoryEntry({
-          ruleId: rule.id,
-          ruleName: rule.name,
-          action: rule.action,
-          result: result.success,
-          message: result.message
+          ruleId: reconnectRuleId || null,
+          ruleName: reconnectRuleId ? `Rule ${reconnectRuleId} (Auto-reconnect)` : 'Auto-reconnect',
+          action: 'connect',
+          result: res.success,
+          message: `Auto-reconnected to "${reconnectSsid}": ${res.message}`
         });
-
-        // Auto-reconnect support via one-time task
-        if (result.success && rule.action === 'disconnect' && rule.autoReconnectMinutes > 0) {
-          const reconnectProfile = rule.targetProfile || (rule.targetSsids && rule.targetSsids[0]);
-          if (reconnectProfile) {
-            await taskscheduler.createReconnectTask(rule.id, reconnectProfile, rule.autoReconnectMinutes);
-          }
+        if (reconnectRuleId && taskscheduler) {
+          await taskscheduler.deleteTask(`\\WiFiOffScheduler\\Reconnect_${reconnectRuleId}`);
         }
-      } else if (reconnectIdx !== -1) {
-        const ssid = process.argv[reconnectIdx + 1];
-        if (ssid) {
-          const recResult = await connectWifi(ssid);
-          store.addHistoryEntry({
-            ruleName: 'Auto-reconnect',
-            action: 'connect',
-            result: recResult.success,
-            message: `Auto-reconnected: ${recResult.message}`,
-            ssid
-          });
+        return;
+      }
 
-          const ruleIdIdx = process.argv.indexOf('--rule-id');
-          const reconnectRuleId = ruleIdIdx !== -1 ? process.argv[ruleIdIdx + 1] : null;
-          if (reconnectRuleId) {
-            await taskscheduler.deleteTask(`\\WiFiOffScheduler\\Reconnect_${reconnectRuleId}`).catch(() => {});
-          }
+      // Case 2: Run rule task
+      const settings = store.getSettings();
+      if (settings && settings.pauseAll) {
+        console.log(`[Headless] Schedules are paused; skipping rule ${headlessRuleId}.`);
+        return;
+      }
+
+      const rules = store.getRules();
+      const rule = rules.find((r) => r.id === headlessRuleId);
+      if (!rule || !rule.enabled || rule.completed) {
+        console.log(`[Headless] Rule ${headlessRuleId} not eligible (missing, disabled, or completed).`);
+        return;
+      }
+
+      const now = new Date();
+      const catchUpMinutes = settings.catchUpMinutes || 10;
+      const windowMs = catchUpMinutes * 60 * 1000;
+
+      // For monthly day 29-31, only run on the clamped target day
+      if (rule.when === 'monthly') {
+        const targetDayConfig = parseInt(rule.dayOfMonth, 10) || 1;
+        const maxDaysInMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate();
+        const clampedTargetDay = Math.min(targetDayConfig, maxDaysInMonth);
+        if (now.getDate() !== clampedTargetDay) {
+          console.log(`[Headless] Today is day ${now.getDate()}, but clamped monthly target day is ${clampedTargetDay}. Skipping.`);
+          return;
+        }
+      }
+
+      // Check if this launch is within the catch-up window or on time
+      let occurrence = checkMissedRun(rule, rule.lastRunKey || '', now, windowMs);
+      if (!occurrence) {
+        const nextRun = computeNextRun(rule, new Date(now.getTime() - 60000));
+        if (nextRun && Math.abs(nextRun.getTime() - now.getTime()) <= 60000) {
+          occurrence = nextRun;
+        }
+      }
+
+      if (!occurrence) {
+        console.log(`[Headless] Launch is outside allowed catch-up window of ${catchUpMinutes}m. Skipping.`);
+        return;
+      }
+
+      const runKey = `${rule.id}_${occurrence.toISOString().slice(0, 16)}`;
+      if (rule.lastRunKey === runKey) {
+        console.log(`[Headless] Occurrence ${runKey} was already executed. Skipping duplicate.`);
+        return;
+      }
+
+      // Execute with the existing wifi.executeRule
+      const result = await executeRule(rule);
+
+      rule.lastRunAt = new Date().toISOString();
+      rule.lastRunResult = result.success ? 'success' : 'error';
+      rule.lastRunMessage = result.message;
+      rule.lastRunKey = runKey;
+
+      if (rule.when === 'once') {
+        rule.completed = true;
+        rule.enabled = false;
+        if (taskscheduler) {
+          await taskscheduler.deleteTask(`\\WiFiOffScheduler\\Rule_${rule.id}`);
+        }
+      }
+
+      store.addOrUpdateRule(rule);
+
+      store.addHistoryEntry({
+        ruleId: rule.id,
+        ruleName: rule.name,
+        action: rule.action,
+        result: result.success,
+        message: result.message
+      });
+
+      // Auto-reconnect if configured
+      if (
+        result.success &&
+        rule.action === 'disconnect' &&
+        rule.autoReconnectMinutes > 0 &&
+        taskscheduler
+      ) {
+        const reconnectProfile = rule.targetProfile || (rule.targetSsids && rule.targetSsids[0]);
+        if (reconnectProfile) {
+          await taskscheduler.scheduleReconnectTask(rule.id, reconnectProfile, rule.autoReconnectMinutes);
         }
       }
     } catch (err) {
       console.error('[Headless] Execution error:', err);
     } finally {
       app.quit();
+      process.exit(0);
     }
   });
-
-  return;
 }
 
-// Single-instance lock
-const gotTheLock = app.requestSingleInstanceLock();
-if (!gotTheLock) {
-  app.quit();
-  process.exit(0);
+// Single-instance lock (GUI mode only)
+if (!isHeadless) {
+  const gotTheLock = app.requestSingleInstanceLock();
+  if (!gotTheLock) {
+    app.quit();
+    process.exit(0);
+  }
+}
+
+function triggerTaskSync() {
+  if (process.platform !== 'win32' || !taskscheduler) return;
+  try {
+    const rules = store.getRules();
+    const settings = store.getSettings();
+    taskscheduler.syncAllTasks(rules, settings).catch((err) => {
+      console.warn('[TaskScheduler] syncAllTasks background error:', err.message);
+    });
+  } catch (err) {
+    console.warn('[TaskScheduler] triggerTaskSync error:', err.message);
+  }
+}
+
+function setupStoreWatchers() {
+  const dir = store.getDataDir();
+  let debounceTimer = null;
+  const notifyUpdated = () => {
+    if (debounceTimer) clearTimeout(debounceTimer);
+    debounceTimer = setTimeout(() => {
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        const rules = store.getRules();
+        mainWindow.webContents.send('rules:updated', rules);
+      }
+    }, 300);
+  };
+
+  try {
+    fs.watch(dir, (_eventType, filename) => {
+      if (filename && (filename.includes('rules.json') || filename.includes('history.json'))) {
+        notifyUpdated();
+      }
+    });
+  } catch (err) {
+    console.warn('[Main] Store directory watcher failed:', err.message);
+  }
 }
 
 let mainWindow = null;
@@ -331,6 +379,7 @@ function updateTrayMenu() {
           mainWindow.webContents.send('settings:updated', updated);
         }
         updateTrayMenu();
+        triggerTaskSync();
         showNotification(
           'Wi-Fi OFF Scheduler',
           updated.pauseAll ? 'All schedules are now paused.' : 'Schedules resumed.'
@@ -530,7 +579,7 @@ function setupIpcHandlers() {
     if (mainWindow && !mainWindow.isDestroyed()) {
       mainWindow.webContents.send('rules:updated', rules);
     }
-    taskscheduler.syncAllTasks(rules, store.getSettings()).catch((e) => console.log('[TaskScheduler] sync failed:', e.message));
+    triggerTaskSync();
     return rules;
   });
 
@@ -539,7 +588,7 @@ function setupIpcHandlers() {
     if (mainWindow && !mainWindow.isDestroyed()) {
       mainWindow.webContents.send('rules:updated', rules);
     }
-    taskscheduler.syncAllTasks(rules, store.getSettings()).catch((e) => console.log('[TaskScheduler] sync failed:', e.message));
+    triggerTaskSync();
     return rules;
   });
 
@@ -558,7 +607,7 @@ function setupIpcHandlers() {
       lastRunMessage: 'Duplicated rule.'
     };
     const updatedRules = store.addOrUpdateRule(copy);
-    taskscheduler.syncAllTasks(updatedRules, store.getSettings()).catch((e) => console.log('[TaskScheduler] sync failed:', e.message));
+    triggerTaskSync();
     return updatedRules;
   });
 
@@ -574,7 +623,7 @@ function setupIpcHandlers() {
       if (mainWindow && !mainWindow.isDestroyed()) {
         mainWindow.webContents.send('rules:updated', rules);
       }
-      taskscheduler.syncAllTasks(rules, store.getSettings()).catch((e) => console.log('[TaskScheduler] sync failed:', e.message));
+      triggerTaskSync();
     }
     return rules;
   });
@@ -631,7 +680,7 @@ function setupIpcHandlers() {
       if (mainWindow && !mainWindow.isDestroyed()) {
         mainWindow.webContents.send('rules:updated', parsed);
       }
-      taskscheduler.syncAllTasks(parsed, store.getSettings()).catch((e) => console.log('[TaskScheduler] sync failed:', e.message));
+      triggerTaskSync();
       return { success: true, count: parsed.length };
     } catch (err) {
       return { success: false, error: err.message };
@@ -652,7 +701,7 @@ function setupIpcHandlers() {
       });
     }
     if (updates.pauseAll !== undefined) {
-      taskscheduler.syncAllTasks(store.getRules(), updated).catch((e) => console.log('[TaskScheduler] sync failed:', e.message));
+      triggerTaskSync();
     }
     updateTrayMenu();
     return updated;
@@ -736,43 +785,17 @@ app.on('second-instance', () => {
   }
 });
 
-function setupFileWatchers() {
-  const dir = path.join(app.getPath('userData'), 'wifi-off-scheduler');
-  let debounceTimer = null;
-
-  const notifyChange = () => {
-    if (debounceTimer) clearTimeout(debounceTimer);
-    debounceTimer = setTimeout(() => {
-      const rules = store.getRules();
-      if (mainWindow && !mainWindow.isDestroyed()) {
-        mainWindow.webContents.send('rules:updated', rules);
-      }
-    }, 300);
-  };
-
-  try {
-    if (fs.existsSync(dir)) {
-      fs.watch(dir, (eventType, filename) => {
-        if (filename === 'rules.json' || filename === 'history.json') {
-          notifyChange();
-        }
-      });
-    }
-  } catch (err) {
-    console.warn('[Main] Storage watcher setup error:', err.message);
-  }
-}
-
 app.whenReady().then(() => {
   createWindow();
   setupTray();
   setupIpcHandlers();
+  setupStoreWatchers();
+  triggerTaskSync();
 
   // Initialize scheduler runner
   schedulerRunner = new SchedulerRunner({
     getRules: () => store.getRules(),
     getSettings: () => store.getSettings(),
-    hasRegisteredTask: (ruleId) => taskscheduler.hasRegisteredTask(ruleId),
     onExecuteRule: handleExecuteRule,
     onRuleUpdated: (updatedRule) => {
       const rules = store.getRules();
@@ -788,14 +811,6 @@ app.whenReady().then(() => {
   });
 
   schedulerRunner.start();
-
-  // Initial Windows Task Scheduler sync (repairs EXE path if app moved)
-  taskscheduler.syncAllTasks(store.getRules(), store.getSettings()).catch((e) => {
-    console.log('[TaskScheduler] Initial sync failed:', e.message);
-  });
-
-  // Watch storage files so headless executions update the open window automatically
-  setupFileWatchers();
 
   // App start catch-up check
   setTimeout(() => {

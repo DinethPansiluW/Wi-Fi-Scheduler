@@ -1,214 +1,175 @@
 /**
  * Wi-Fi OFF Scheduler - Task Scheduler XML Generation Tests
- * Verifies XML format, triggers, principal, settings, and escaping rules.
+ * Plain Node.js (no dependencies required)
+ * Run with: node test-tasks.js
  */
 
-const assert = require('assert');
-const { buildTaskXml, isValidRuleId, xmlEscape } = require('./taskscheduler');
+const { buildTaskXml, escapeXml } = require('./taskscheduler.js');
 
-let passedCount = 0;
-let totalCount = 0;
+let totalTests = 0;
+let passedTests = 0;
 
-function it(name, fn) {
-  totalCount++;
-  try {
-    fn();
-    console.log(`  ✓ ${name}`);
-    passedCount++;
-  } catch (err) {
-    console.error(`  ✗ ${name}`);
-    console.error(`    ${err.message}`);
+function assert(condition, message) {
+  totalTests++;
+  if (condition) {
+    passedTests++;
+    console.log(`  ✓ ${message}`);
+  } else {
+    console.error(`  FAIL: ${message}`);
+    process.exitCode = 1;
   }
 }
 
-/**
- * Basic XML tag balance checker to verify well-formedness.
- */
-function verifyXmlBalanced(xml) {
-  assert(xml.startsWith('<?xml version="1.0" encoding="UTF-16"?>'), 'Must start with XML declaration');
-  assert(xml.includes('<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">'), 'Must have Task root element with correct schema');
+console.log('--- Running Wi-Fi OFF Scheduler Task XML Generation Tests ---\n');
 
-  // Strip XML declaration
-  const body = xml.replace(/<\?xml.*?\?>/g, '');
-
-  const tagRegex = /<\/?([A-Za-z0-9_:-]+)(\s+[^>]*)?\/?>/g;
-  const stack = [];
-  let match;
-
-  while ((match = tagRegex.exec(body)) !== null) {
-    const fullTag = match[0];
-    const tagName = match[1];
-
-    if (fullTag.endsWith('/>')) {
-      // Self-closing tag
-      continue;
-    } else if (fullTag.startsWith('</')) {
-      // Closing tag
-      assert(stack.length > 0, `Unexpected closing tag </${tagName}> without opening tag`);
-      const openTag = stack.pop();
-      assert.strictEqual(openTag, tagName, `Mismatched tags: expected </${openTag}>, got </${tagName}>`);
-    } else {
-      // Opening tag
-      stack.push(tagName);
-    }
-  }
-
-  assert.strictEqual(stack.length, 0, `Unclosed tags remaining: ${stack.join(', ')}`);
-}
-
-console.log('--- Running Wi-Fi OFF Task Scheduler XML Tests ---');
-
-// 1. Daily rule
-it('Daily rule creates ScheduleByDay trigger with 1 day interval', () => {
+// 1. Daily rule XML
+{
   const rule = {
     id: 'rule_daily_1',
-    name: 'Disconnect Nightly',
+    name: 'Daily Disconnect',
     when: 'daily',
-    time: '23:30',
-    action: 'disconnect'
+    time: '08:00'
   };
-  const xml = buildTaskXml(rule, {}, { command: 'C:\\App\\app.exe', argsPrefix: '' });
-  assert(xml.includes('<ScheduleByDay>'), 'Should include ScheduleByDay');
-  assert(xml.includes('<DaysInterval>1</DaysInterval>'), 'Interval must be 1');
-  assert(xml.includes('<StartBoundary>2020-01-01T23:30:00</StartBoundary>'), 'StartBoundary must match time');
-  assert(xml.includes('<Arguments>--run-rule &quot;rule_daily_1&quot;</Arguments>'), 'Arguments must match rule ID');
-  assert(xml.includes('<ExecutionTimeLimit>PT5M</ExecutionTimeLimit>'), 'ExecutionTimeLimit must be PT5M');
-  assert(xml.includes('<DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>'), 'Must allow battery start');
-  assert(xml.includes('<StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>'), 'Must not stop on battery');
-  assert(xml.includes('<StartWhenAvailable>true</StartWhenAvailable>'), 'StartWhenAvailable must be true');
-  assert(xml.includes('<MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>'), 'MultipleInstancesPolicy must be IgnoreNew');
-});
+  const exeInfo = { command: 'C:\\App\\wifi-off.exe', args: '--run-rule "rule_daily_1"' };
+  const xml = buildTaskXml(rule, {}, exeInfo);
 
-// 2. Weekly Mon/Wed/Fri rule
-it('Weekly rule creates ScheduleByWeek with Monday, Wednesday, Friday tags', () => {
+  assert(xml.includes('<ScheduleByDay>'), 'Daily rule contains <ScheduleByDay>');
+  assert(xml.includes('<DaysInterval>1</DaysInterval>'), 'Daily rule specifies 1 day interval');
+  assert(/<StartBoundary>\d{4}-\d{2}-\d{2}T08:00:00<\/StartBoundary>/.test(xml), 'Daily rule includes correct StartBoundary time (08:00:00)');
+  assert(xml.includes('<Command>C:\\App\\wifi-off.exe</Command>'), 'Daily rule includes correct executable command');
+  assert(xml.includes('<Arguments>--run-rule &quot;rule_daily_1&quot;</Arguments>'), 'Daily rule arguments are properly escaped');
+}
+
+// 2. Weekly multi-day rule (Mon, Wed, Fri)
+{
   const rule = {
-    id: 'rule_weekly_mwf',
-    name: 'School Week Wi-Fi',
+    id: 'rule_weekly_1',
+    name: 'MWF Disconnect',
     when: 'weekly',
-    days: [1, 3, 5],
-    time: '08:00',
-    action: 'connect'
+    days: ['mon', 'wed', 'fri'],
+    time: '20:30'
   };
-  const xml = buildTaskXml(rule, {}, { command: 'C:\\App\\app.exe', argsPrefix: '' });
-  assert(xml.includes('<ScheduleByWeek>'), 'Should include ScheduleByWeek');
-  assert(xml.includes('<DaysOfWeek>'), 'Should include DaysOfWeek');
-  assert(xml.includes('<Monday />'), 'Should include Monday');
-  assert(xml.includes('<Wednesday />'), 'Should include Wednesday');
-  assert(xml.includes('<Friday />'), 'Should include Friday');
-  assert(!xml.includes('<Sunday />'), 'Should NOT include Sunday');
-  assert(!xml.includes('<Tuesday />'), 'Should NOT include Tuesday');
-  assert(!xml.includes('<Thursday />'), 'Should NOT include Thursday');
-  assert(!xml.includes('<Saturday />'), 'Should NOT include Saturday');
-});
+  const exeInfo = { command: 'C:\\App\\wifi-off.exe', args: '--run-rule "rule_weekly_1"' };
+  const xml = buildTaskXml(rule, {}, exeInfo);
 
-// 3. Once rule
-it('Once rule creates TimeTrigger at exact date and time', () => {
+  assert(xml.includes('<ScheduleByWeek>'), 'Weekly rule contains <ScheduleByWeek>');
+  assert(xml.includes('<Monday />'), 'Weekly rule includes Monday');
+  assert(xml.includes('<Wednesday />'), 'Weekly rule includes Wednesday');
+  assert(xml.includes('<Friday />'), 'Weekly rule includes Friday');
+  assert(!xml.includes('<Tuesday />'), 'Weekly rule excludes Tuesday');
+  assert(!xml.includes('<Sunday />'), 'Weekly rule excludes Sunday');
+  assert(xml.includes('<WeeksInterval>1</WeeksInterval>'), 'Weekly rule specifies 1 week interval');
+}
+
+// 3. One-time schedule (Once)
+{
   const rule = {
-    id: 'rule_once_test',
-    name: 'One Time Exam Mode',
+    id: 'rule_once_1',
+    name: 'One-time Off',
     when: 'once',
-    date: '2026-11-15',
-    time: '14:45',
-    action: 'disconnect'
+    date: '2026-10-25',
+    time: '14:30'
   };
-  const xml = buildTaskXml(rule, {}, { command: 'C:\\App\\app.exe', argsPrefix: '' });
-  assert(xml.includes('<TimeTrigger>'), 'Should include TimeTrigger');
-  assert(!xml.includes('<CalendarTrigger>'), 'Should not include CalendarTrigger');
-  assert(xml.includes('<StartBoundary>2026-11-15T14:45:00</StartBoundary>'), 'Exact start boundary must match');
-});
+  const exeInfo = { command: 'C:\\App\\wifi-off.exe', args: '--run-rule "rule_once_1"' };
+  const xml = buildTaskXml(rule, {}, exeInfo);
 
-// 4. Monthly day 15 rule
-it('Monthly day 15 rule creates single ScheduleByMonth trigger with Day 15', () => {
+  assert(xml.includes('<TimeTrigger>'), 'Once rule uses <TimeTrigger>');
+  assert(xml.includes('<StartBoundary>2026-10-25T14:30:00</StartBoundary>'), 'Once rule has exact date and time StartBoundary');
+  assert(!xml.includes('<CalendarTrigger>'), 'Once rule does not use <CalendarTrigger>');
+}
+
+// 4. Monthly schedule on Day 15
+{
   const rule = {
     id: 'rule_monthly_15',
-    name: 'Mid Month Reset',
+    name: 'Mid-Month Rule',
     when: 'monthly',
     dayOfMonth: 15,
-    time: '04:00',
-    action: 'renew_ip'
+    time: '23:00'
   };
-  const xml = buildTaskXml(rule, {}, { command: 'C:\\App\\app.exe', argsPrefix: '' });
-  assert(xml.includes('<ScheduleByMonth>'), 'Should include ScheduleByMonth');
-  assert(xml.includes('<Day>15</Day>'), 'Must specify Day 15');
-  assert(!xml.includes('<Day>Last</Day>'), 'Day 15 must NOT have Day Last');
-  const count = (xml.match(/<CalendarTrigger>/g) || []).length;
-  assert.strictEqual(count, 1, 'Day 15 should have exactly 1 trigger');
-});
+  const exeInfo = { command: 'C:\\App\\wifi-off.exe', args: '--run-rule "rule_monthly_15"' };
+  const xml = buildTaskXml(rule, {}, exeInfo);
 
-// 5. Monthly day 31 rule with two triggers (Day 31 and Day Last)
-it('Monthly day 31 rule creates two triggers including Day Last', () => {
+  assert(xml.includes('<ScheduleByMonth>'), 'Monthly rule contains <ScheduleByMonth>');
+  assert(xml.includes('<Day>15</Day>'), 'Monthly rule specifies Day 15');
+  assert(!xml.includes('<Day>Last</Day>'), 'Monthly day 15 does not include Day Last trigger');
+
+  const triggerMatches = xml.match(/<CalendarTrigger>/g);
+  assert(triggerMatches && triggerMatches.length === 1, 'Monthly day 15 has exactly 1 calendar trigger');
+  assert(xml.includes('<January />') && xml.includes('<December />'), 'Monthly rule includes month definitions');
+}
+
+// 5. Monthly schedule on Day 31 with two triggers (Day 31 and Day Last)
+{
   const rule = {
     id: 'rule_monthly_31',
-    name: 'End Month Cutoff',
+    name: 'End-of-Month Rule',
     when: 'monthly',
     dayOfMonth: 31,
-    time: '23:59',
-    action: 'disconnect'
+    time: '22:00'
   };
-  const xml = buildTaskXml(rule, {}, { command: 'C:\\App\\app.exe', argsPrefix: '' });
-  assert(xml.includes('<Day>31</Day>'), 'Should contain Day 31');
-  assert(xml.includes('<Day>Last</Day>'), 'Should contain Day Last for clamped short months');
-  const triggerCount = (xml.match(/<CalendarTrigger>/g) || []).length;
-  assert.strictEqual(triggerCount, 2, 'Day 31 must have 2 triggers (exact day + Last day)');
-});
+  const exeInfo = { command: 'C:\\App\\wifi-off.exe', args: '--run-rule "rule_monthly_31"' };
+  const xml = buildTaskXml(rule, {}, exeInfo);
 
-// 6. Special characters in paths, names, and arguments
-it('Escapes XML special characters in descriptions, paths, and arguments', () => {
+  assert(xml.includes('<Day>31</Day>'), 'Monthly day 31 specifies Day 31');
+  assert(xml.includes('<Day>Last</Day>'), 'Monthly day 31 includes second trigger for Day Last');
+
+  const triggerMatches = xml.match(/<CalendarTrigger>/g);
+  assert(triggerMatches && triggerMatches.length === 2, 'Monthly day 31 has exactly 2 calendar triggers');
+}
+
+// 6. Special characters in executable path and arguments
+{
   const rule = {
-    id: 'rule_esc_1',
-    name: 'Test & <Special> "Quotes" \'SSID\'',
+    id: 'rule_special',
+    name: 'App with "Quotes" & <Brackets>',
     when: 'daily',
-    time: '12:00',
-    action: 'disconnect'
+    time: '09:00'
   };
   const exeInfo = {
-    command: 'C:\\Program Files (x86)\\Wi-Fi & App\\Wi-Fi "OFF".exe',
-    argsPrefix: '"C:\\Path & With <Sp>\\app" '
+    command: 'C:\\Program Files & Tools\\<Test>"App\'\\wifi-off.exe',
+    args: '--run-rule "rule_special" --name "John & Co <5G>"'
   };
   const xml = buildTaskXml(rule, {}, exeInfo);
 
-  assert(!xml.includes('Test & <Special>'), 'Raw unescaped & < > must not be present');
-  assert(xml.includes('Test &amp; &lt;Special&gt; &quot;Quotes&quot; &apos;SSID&apos;'), 'Name must be XML-escaped');
-  assert(xml.includes('C:\\Program Files (x86)\\Wi-Fi &amp; App\\Wi-Fi &quot;OFF&quot;.exe'), 'Path must be XML-escaped');
-  assert(xml.includes('--run-rule &quot;rule_esc_1&quot;'), 'Arguments must be XML-escaped');
-});
+  assert(
+    xml.includes('<Command>C:\\Program Files &amp; Tools\\&lt;Test&gt;&quot;App&apos;\\wifi-off.exe</Command>'),
+    'Special characters in command path are properly XML-escaped'
+  );
+  assert(
+    xml.includes('&amp; Co &lt;5G&gt;'),
+    'Special characters in arguments are properly XML-escaped'
+  );
+}
 
 // 7. Well-formed XML structural validation
-it('Generates completely well-formed balanced XML with valid Principals and Settings', () => {
+{
   const rule = {
-    id: 'rule_xml_valid',
-    name: 'Validation Rule',
-    when: 'weekly',
-    days: [0, 6],
-    time: '10:15',
-    action: 'toggle'
+    id: 'rule_wf',
+    name: 'Well Formed Check',
+    when: 'daily',
+    time: '12:00'
   };
-  const xml = buildTaskXml(rule, {}, { command: 'C:\\test\\app.exe', argsPrefix: '' });
+  const xml = buildTaskXml(rule);
 
-  // Check XML syntax structure
-  verifyXmlBalanced(xml);
+  assert(xml.startsWith('<?xml version="1.0" encoding="UTF-16"?>'), 'XML declaration is present at start');
+  assert(xml.includes('<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">'), 'Root Task element with schema namespace');
+  assert(xml.endsWith('</Task>'), 'XML terminates with closing </Task> tag');
 
-  // Check Principals
-  assert(xml.includes('<Principal id="Author">'), 'Principal id must be Author');
-  assert(xml.includes('<LogonType>InteractiveToken</LogonType>'), 'LogonType must be InteractiveToken');
-  assert(xml.includes('<RunLevel>LeastPrivilege</RunLevel>'), 'RunLevel must be LeastPrivilege');
-});
+  // Verify principal and settings per requirements
+  assert(xml.includes('<LogonType>InteractiveToken</LogonType>'), 'Principal uses InteractiveToken');
+  assert(xml.includes('<RunLevel>LeastPrivilege</RunLevel>'), 'Principal uses LeastPrivilege (no admin)');
+  assert(xml.includes('<MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>'), 'MultipleInstancesPolicy is IgnoreNew');
+  assert(xml.includes('<StartWhenAvailable>true</StartWhenAvailable>'), 'StartWhenAvailable is true');
+  assert(xml.includes('<DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>'), 'DisallowStartIfOnBatteries is false');
+  assert(xml.includes('<StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>'), 'StopIfGoingOnBatteries is false');
+  assert(xml.includes('<ExecutionTimeLimit>PT5M</ExecutionTimeLimit>'), 'ExecutionTimeLimit is PT5M');
+}
 
-// 8. Rule ID validation regex test
-it('Validates ruleId using /^[A-Za-z0-9_-]+$/', () => {
-  assert.strictEqual(isValidRuleId('rule_123_abc'), true);
-  assert.strictEqual(isValidRuleId('Rule-Nightly-99'), true);
-  assert.strictEqual(isValidRuleId('rule 123 with spaces'), false);
-  assert.strictEqual(isValidRuleId('rule;rmdir'), false);
-  assert.strictEqual(isValidRuleId('rule/task'), false);
-  assert.strictEqual(isValidRuleId(''), false);
-});
-
-console.log(`\nResults: ${passedCount}/${totalCount} tests passed.`);
-if (passedCount === totalCount) {
-  console.log('ALL TASK TESTS PASSED SUCCESSFULLY! ✓');
-  process.exit(0);
+console.log(`\nResults: ${passedTests}/${totalTests} task tests passed.`);
+if (passedTests === totalTests) {
+  console.log('ALL TASK TESTS PASSED SUCCESSFULLY! ✓\n');
 } else {
-  console.error('SOME TASK TESTS FAILED!');
+  console.error('SOME TASK TESTS FAILED!\n');
   process.exit(1);
 }

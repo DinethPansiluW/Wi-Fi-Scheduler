@@ -422,12 +422,11 @@ function formatDateTime(date, timeFormat = '12h') {
  * Scheduler runner class that manages the 15-second loop, execution firing, and reconnection timers.
  */
 class SchedulerRunner {
-  constructor({ getRules, getSettings, onExecuteRule, onRuleUpdated, hasRegisteredTask }) {
+  constructor({ getRules, getSettings, onExecuteRule, onRuleUpdated }) {
     this.getRules = getRules;
     this.getSettings = getSettings;
     this.onExecuteRule = onExecuteRule;
     this.onRuleUpdated = onRuleUpdated;
-    this.hasRegisteredTask = hasRegisteredTask;
     this.intervalId = null;
     this.reconnectTimers = new Map(); // ruleId -> timeoutId
     this.lastFiredKeys = new Set();
@@ -480,11 +479,6 @@ class SchedulerRunner {
         // Fire if due within 15 seconds window or already due
         const diffMs = nextRun.getTime() - now.getTime();
         if (diffMs <= 1000) {
-          // If rule has an active Windows Task Scheduler job, skip in-app execution to avoid double firing
-          if (this.hasRegisteredTask && this.hasRegisteredTask(rule.id)) {
-            continue;
-          }
-
           const runKey = `${rule.id}_${nextRun.toISOString().slice(0, 16)}`;
           if (this.lastFiredKeys.has(runKey)) {
             continue;
@@ -497,13 +491,13 @@ class SchedulerRunner {
             this.lastFiredKeys = new Set(arr.slice(arr.length - 1000));
           }
 
-          // Trigger execution
-          if (this.onExecuteRule) {
+          // Trigger execution (skip in-app execution if handled by OS Task Scheduler)
+          if (!rule.hasOsTask && this.onExecuteRule) {
             this.onExecuteRule(rule, 'scheduled', runKey);
           }
 
-          // If once rule, mark completed & disabled
-          if (rule.when === 'once') {
+          // If once rule, mark completed & disabled (if not handled by OS task)
+          if (!rule.hasOsTask && rule.when === 'once') {
             rule.completed = true;
             rule.enabled = false;
             if (this.onRuleUpdated) this.onRuleUpdated(rule);
@@ -529,17 +523,13 @@ class SchedulerRunner {
 
         const missed = checkMissedRun(rule, rule.lastRunKey || '', referenceTime, windowMs);
         if (missed) {
-          if (this.hasRegisteredTask && this.hasRegisteredTask(rule.id)) {
-            continue;
-          }
-
           const runKey = `${rule.id}_${missed.toISOString().slice(0, 16)}`;
           if (!this.lastFiredKeys.has(runKey)) {
             this.lastFiredKeys.add(runKey);
-            if (this.onExecuteRule) {
+            if (!rule.hasOsTask && this.onExecuteRule) {
               this.onExecuteRule(rule, 'catchup', runKey);
             }
-            if (rule.when === 'once') {
+            if (!rule.hasOsTask && rule.when === 'once') {
               rule.completed = true;
               rule.enabled = false;
               if (this.onRuleUpdated) this.onRuleUpdated(rule);
