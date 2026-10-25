@@ -67,7 +67,6 @@ wifi-off-scheduler/
 ├── build/
 │   ├── icon.ico
 │   ├── icon.png
-│   ├── installer.nsh          # NSIS uninstaller script to remove background tasks
 │   └── README.txt
 ├── dev-server.js              # Standalone web preview server for testing
 ├── main.js                    # Main process with headless runner & IPC handlers
@@ -119,7 +118,7 @@ npm start
 npm run dist
 ```
 Produces:
-- **NSIS Installer**: `release/Wi-Fi OFF Scheduler-Setup-1.5.2.exe` (includes automatic Task Scheduler cleanup upon uninstall).
+- **NSIS Installer**: `release/Wi-Fi OFF Scheduler-Setup-1.5.2.exe`.
 - **Portable Executable**: `release/Wi-Fi OFF Scheduler-Portable-1.5.2.exe` (zero-install single `.exe`).
 - **Unpacked Folder**: `release/win-unpacked/Wi-Fi OFF Scheduler.exe`
 

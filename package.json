@@ -3,6 +3,7 @@
   "productName": "Wi-Fi OFF Scheduler",
   "description": "Windows desktop application for flexible automated Wi-Fi disconnection, connection, toggling, and IP renewal scheduling.",
   "version": "1.5.2",
+  "author": "DinethPansiluW",
   "main": "main.js",
   "engines": {
     "node": ">=18"
@@ -44,10 +45,10 @@
       ],
       "icon": "build/icon.ico",
       "requestedExecutionLevel": "asInvoker",
+      "signAndEditExecutable": false,
       "forceCodeSigning": false
     },
     "nsis": {
-      "include": "build/installer.nsh",
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,

@@ -360,6 +360,30 @@ function deleteTask(taskName) {
 }
 
 /**
+ * Removes all Wi-Fi OFF Scheduler tasks using schtasks /Delete /TN "\WiFiOffScheduler\*" /F
+ */
+function removeAllTasks() {
+  return new Promise((resolve) => {
+    if (!IS_WIN) {
+      return resolve({ ok: true });
+    }
+
+    execFile(
+      'schtasks',
+      ['/Delete', '/TN', '\\WiFiOffScheduler\\*', '/F'],
+      { windowsHide: true, timeout: 15000 },
+      (err, stdout, stderr) => {
+        if (err && stderr && !stderr.toLowerCase().includes('cannot find') && !stderr.toLowerCase().includes('not exist')) {
+          resolve({ ok: false, error: stderr.trim() });
+        } else {
+          resolve({ ok: true });
+        }
+      }
+    );
+  });
+}
+
+/**
  * Schedules a one-time auto-reconnect task at now + delayMinutes.
  */
 async function scheduleReconnectTask(ruleId, ssid, delayMinutes) {
@@ -438,6 +462,7 @@ module.exports = {
   syncAllTasks,
   createScheduledTask,
   deleteTask,
+  removeAllTasks,
   scheduleReconnectTask,
   escapeXml,
   getExeInfo,

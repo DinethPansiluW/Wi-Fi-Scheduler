@@ -48,7 +48,8 @@ function getCliArg(flag) {
 const headlessRuleId = getCliArg('--run-rule');
 const reconnectSsid = getCliArg('--reconnect');
 const reconnectRuleId = getCliArg('--rule-id');
-const isHeadless = Boolean(headlessRuleId || reconnectSsid !== null);
+const removeAllTasksFlag = process.argv.includes('--remove-all-tasks');
+const isHeadless = Boolean(headlessRuleId || reconnectSsid !== null || removeAllTasksFlag);
 
 if (isHeadless) {
   // Headless mode for Task Scheduler execution
@@ -60,6 +61,16 @@ if (isHeadless) {
   app.whenReady().then(async () => {
     try {
       store.init();
+
+      // Case 0: Remove all tasks request
+      if (removeAllTasksFlag) {
+        if (taskscheduler && typeof taskscheduler.removeAllTasks === 'function') {
+          await taskscheduler.removeAllTasks();
+        }
+        app.quit();
+        process.exit(0);
+        return;
+      }
 
       // Case 1: Reconnect task
       if (reconnectSsid !== null) {
