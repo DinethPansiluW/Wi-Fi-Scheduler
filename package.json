@@ -9,6 +9,8 @@
   },
   "scripts": {
     "dev": "node dev-server.js",
+    "build": "node test-schedule.js && node test-tasks.js",
+    "lint": "node -c main.js scheduler.js taskscheduler.js wifi.js store.js preload.js test-schedule.js test-tasks.js",
     "start": "electron .",
     "dist": "electron-builder --win",
     "test:schedule": "node test-schedule.js",
@@ -42,7 +44,6 @@
       ],
       "icon": "build/icon.ico",
       "requestedExecutionLevel": "asInvoker",
-      "signAndEditExecutable": false,
       "forceCodeSigning": false
     },
     "nsis": {
@@ -51,7 +52,9 @@
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
-      "artifactName": "${productName}-Setup-${version}.${ext}"
+      "artifactName": "${productName}-Setup-${version}.${ext}",
+      "installerIcon": "build/icon.ico",
+      "uninstallerIcon": "build/icon.ico"
     },
     "portable": {
       "artifactName": "${productName}-Portable-${version}.${ext}"
